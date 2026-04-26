@@ -9,7 +9,8 @@ param(
     [string]$GogSourceDir   = (Join-Path $PSScriptRoot "GOG-Archive"),
     [string]$SteamSourceDir = (Join-Path $PSScriptRoot "Steam-Archive"),
     [string]$DestinationDir = (Join-Path $PSScriptRoot "GameVault-Ready"),
-    [string]$SevenZipPath
+    [string]$SevenZipPath,
+    [switch]$EmitSha256
 )
 
 Set-StrictMode -Version Latest
@@ -43,6 +44,34 @@ function Get-FolderSize
         Measure-Object -Property Length -Sum).Sum
     if ($null -eq $sum) { return 0 }
     return [int64]$sum
+}
+
+# Append one row to manifest.csv describing a successful compression.
+function Add-ManifestEntry
+{
+    param(
+        [string]$ManifestPath,
+        [string]$Name,
+        [string]$Source,
+        [string]$ArchivePath,
+        [int64]$SourceBytes,
+        [TimeSpan]$Duration,
+        [switch]$IncludeHash
+    )
+    $archiveBytes = (Get-Item -LiteralPath $ArchivePath).Length
+    $ratio = if ($SourceBytes -gt 0) { [math]::Round($archiveBytes / $SourceBytes, 4) } else { 0 }
+    $hash  = if ($IncludeHash) { (Get-FileHash -Algorithm SHA256 -LiteralPath $ArchivePath).Hash } else { '' }
+    $row = [PSCustomObject]@{
+        CompletedAt      = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ssK')
+        Name             = $Name
+        Source           = $Source
+        SourceBytes      = $SourceBytes
+        ArchiveBytes     = $archiveBytes
+        CompressionRatio = $ratio
+        DurationSeconds  = [math]::Round($Duration.TotalSeconds, 2)
+        SHA256           = $hash
+    }
+    $row | Export-Csv -LiteralPath $ManifestPath -Append -NoTypeInformation -Encoding UTF8
 }
 
 # Strip characters Windows forbids in filenames and trim whitespace/trailing dots.
@@ -275,8 +304,12 @@ if ($freeBytes -lt $estArchiveBytes)
     Write-Warning "Estimated archives will need ~${needGB} GB; only ${haveGB} GB free on $($destDrive.Name). You may run out partway through."
 }
 
+$manifestPath = Join-Path $DestinationDir "manifest.csv"
+
 Write-Host "`nTotal: $($allGames.Count) game folders to process" -ForegroundColor Green
+Write-Host "Manifest -> $manifestPath"
 Write-Host ("Source: {0:N2} GB  |  Free on {1}: {2:N2} GB  |  Est. archives: {3:N2} GB" -f ($totalSourceBytes/1GB), $destDrive.Name, ($freeBytes/1GB), ($estArchiveBytes/1GB))
+if ($EmitSha256) { Write-Host "SHA256 hashing: ON (slower)" -ForegroundColor DarkGray }
 Write-Host "-----------------------------------------"
 
 foreach ($game in $allGames)
@@ -304,11 +337,15 @@ foreach ($game in $allGames)
         continue
     }
 
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $success = Compress-Game -sourcePath $gamePath -destinationFile $destinationFile -compressionLevel ([int]$compressionChoice)
+    $sw.Stop()
 
     if ($success)
     {
         Write-Host "Successfully prepared $gameName for GameVault" -ForegroundColor Green
+        $sourceBytes = Get-FolderSize -Path $gamePath
+        Add-ManifestEntry -ManifestPath $manifestPath -Name $fileName -Source $gameSource -ArchivePath $destinationFile -SourceBytes $sourceBytes -Duration $sw.Elapsed -IncludeHash:$EmitSha256
     } else
     {
         Write-Warning "Failed to prepare $gameName"

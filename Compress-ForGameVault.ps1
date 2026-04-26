@@ -10,7 +10,8 @@ param(
     [string]$GogSourceDir   = (Join-Path $PSScriptRoot "GOG-Archive"),
     [string]$SteamSourceDir = (Join-Path $PSScriptRoot "Steam-Archive"),
     [string]$DestinationDir = (Join-Path $PSScriptRoot "GameVault-Ready"),
-    [string]$SevenZipPath
+    [string]$SevenZipPath,
+    [switch]$EmitSha256
 )
 
 Set-StrictMode -Version Latest
@@ -47,6 +48,34 @@ function Get-FolderSize
         Measure-Object -Property Length -Sum).Sum
     if ($null -eq $sum) { return 0 }
     return [int64]$sum
+}
+
+# Append one row to manifest.csv describing a successful compression.
+function Add-ManifestEntry
+{
+    param(
+        [string]$ManifestPath,
+        [string]$Name,
+        [string]$Source,
+        [string]$ArchivePath,
+        [int64]$SourceBytes,
+        [TimeSpan]$Duration,
+        [switch]$IncludeHash
+    )
+    $archiveBytes = (Get-Item -LiteralPath $ArchivePath).Length
+    $ratio = if ($SourceBytes -gt 0) { [math]::Round($archiveBytes / $SourceBytes, 4) } else { 0 }
+    $hash  = if ($IncludeHash) { (Get-FileHash -Algorithm SHA256 -LiteralPath $ArchivePath).Hash } else { '' }
+    $row = [PSCustomObject]@{
+        CompletedAt      = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ssK')
+        Name             = $Name
+        Source           = $Source
+        SourceBytes      = $SourceBytes
+        ArchiveBytes     = $archiveBytes
+        CompressionRatio = $ratio
+        DurationSeconds  = [math]::Round($Duration.TotalSeconds, 2)
+        SHA256           = $hash
+    }
+    $row | Export-Csv -LiteralPath $ManifestPath -Append -NoTypeInformation -Encoding UTF8
 }
 
 if (-not $SevenZipPath) { $SevenZipPath = Find-SevenZip }
@@ -144,10 +173,15 @@ if ($freeBytes -lt $estArchiveBytes)
     exit 1
 }
 
+$manifestPath = Join-Path $DestinationDir "manifest.csv"
+
 Write-Host "`nFound $($valid.Count) folder(s) to compress." -ForegroundColor Cyan
 Write-Host "Output -> $DestinationDir"
+Write-Host "Manifest -> $manifestPath"
 Write-Host ("Source: {0:N2} GB  |  Free on {1}: {2:N2} GB  |  Est. archive: {3:N2} GB" -f ($totalSourceBytes/1GB), $destDrive.Name, ($freeBytes/1GB), ($estArchiveBytes/1GB))
-Write-Host "Compression: Maximum (-mx=9 -mfb=64 -md=32m -ms=on -mmt=on)`n"
+Write-Host "Compression: Maximum (-mx=9 -mfb=64 -md=32m -ms=on -mmt=on)"
+if ($EmitSha256) { Write-Host "SHA256 hashing: ON (slower)" -ForegroundColor DarkGray }
+Write-Host ""
 Write-Host ("-" * 60)
 
 $success = 0
@@ -177,6 +211,7 @@ foreach ($game in $valid)
     $tempArchive = "$archivePath.tmp"
     if (Test-Path $tempArchive) { Remove-Item $tempArchive -Force }
 
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
     try
     {
         & "$SevenZipPath" a -mx=9 -mfb=64 -md=32m -ms=on -mmt=on "$tempArchive" "$($game.Path)\*" | Out-Null
@@ -185,10 +220,14 @@ foreach ($game in $valid)
             throw "7-Zip exited $LASTEXITCODE"
         }
         Move-Item -LiteralPath $tempArchive -Destination $archivePath
-        Write-Host "  OK -> $archiveName" -ForegroundColor Green
+        $sw.Stop()
+        Write-Host ("  OK -> $archiveName ({0:N1}s)" -f $sw.Elapsed.TotalSeconds) -ForegroundColor Green
+        $sourceBytes = Get-FolderSize -Path $game.Path
+        Add-ManifestEntry -ManifestPath $manifestPath -Name $game.Name -Source $game.Source -ArchivePath $archivePath -SourceBytes $sourceBytes -Duration $sw.Elapsed -IncludeHash:$EmitSha256
         $success++
     } catch
     {
+        $sw.Stop()
         if (Test-Path $tempArchive) { Remove-Item -LiteralPath $tempArchive -Force -ErrorAction SilentlyContinue }
         Write-Host "  FAILED ($_)" -ForegroundColor Red
         Write-Error "7-Zip failed for '$($game.Name)': $_" -ErrorAction Continue
