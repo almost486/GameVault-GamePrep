@@ -1,2 +1,8 @@
+# OS
 .DS_Store
-.DS_Store
+Thumbs.db
+
+# User data — never commit game folders or generated archives
+GOG-Archive/
+Steam-Archive/
+GameVault-Ready/
