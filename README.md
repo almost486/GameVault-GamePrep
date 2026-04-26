@@ -8,7 +8,7 @@ PowerShell scripts that automate preparing GOG and Steam games for [GameVault](h
 Interactive script that prompts you for game metadata (title, version, release year, game type, etc.) and compresses each game folder into a properly named `.7z` archive. Use this when your source folders are not yet named per GameVault conventions.
 
 ### `Compress-ForGameVault.ps1`
-Batch compression script for game folders that are **already** named per GameVault conventions. Compresses every folder in the source directories using maximum compression with no prompts. Skips any game that already has an archive in the destination.
+Batch compression script for game folders that are **already** named per GameVault conventions. Compresses every validly-named folder using maximum compression with no prompts. Runs an integrity check (`7z t`) on existing archives before skipping them; corrupt archives are automatically rebuilt. Supports parallel compression via `-Parallel` for multi-drive setups.
 
 ## Features
 
@@ -20,8 +20,14 @@ Batch compression script for game folders that are **already** named per GameVau
 - Resolves all paths relative to the script (`$PSScriptRoot`), so the repo can live anywhere
 - Auto-detects 7-Zip in standard install locations and on `PATH`; supports a `SEVENZIP_PATH` env-var override
 - Compresses with multithreading enabled (`-mmt=on`) for faster runs on multi-core CPUs
-- `Compress-ForGameVault.ps1` pre-flights folder names against the GameVault format and skips invalid ones before any compression starts
-- `Prepare-GamesForGameVault.ps1` sanitizes user-typed titles to remove characters Windows forbids in filenames
+- `Compress-ForGameVault.ps1` pre-flights folder names against GameVault format; invalid names are reported and skipped before compression starts
+- `Compress-ForGameVault.ps1` integrity-tests existing archives with `7z t` before skipping; corrupt archives are rebuilt automatically
+- `Compress-ForGameVault.ps1` supports configurable source directories via `-Sources` hashtable (add Itch, Epic, etc. without forking)
+- `Compress-ForGameVault.ps1` supports optional parallel compression (`-Parallel`, PS 7+ only)
+- `Prepare-GamesForGameVault.ps1` sanitizes user-typed titles to strip characters Windows forbids in filenames
+- `Prepare-GamesForGameVault.ps1` parses existing folder names to pre-fill all metadata prompts — just press Enter to accept
+- Both scripts emit `GameVault-Ready\manifest.csv` (name, source, sizes, compression ratio, duration, optional SHA-256)
+- Both scripts support `-WhatIf` for dry-run and accept `-SevenZipPath`, `-DestinationDir`, and other path overrides as parameters
 
 ## Requirements
 
@@ -77,8 +83,10 @@ Use this when your folders are not yet named per GameVault conventions.
 .\Prepare-GamesForGameVault.ps1
 ```
 
-4. Follow the prompts for each game found. Title input is sanitized — characters Windows forbids in filenames (`<>:"/\|?*` plus controls) are stripped automatically. Game-type input is validated against the allowed set; invalid values reprompt
-5. Compressed archives are saved to `GameVault-Ready\`
+4. Choose a session-wide default compression level (can override per game)
+5. For each game: press **Enter** to process, **s** to skip, or **q** to quit. If the folder name already follows GameVault conventions, all metadata prompts are pre-filled — just press Enter to accept
+6. Title input is sanitized automatically. Game-type is validated; invalid values reprompt. Year is validated against the range 1970–(current year + 1)
+7. Compressed archives are saved to `GameVault-Ready\`; a row is appended to `GameVault-Ready\manifest.csv` after each success
 
 ### Batch compression (`Compress-ForGameVault.ps1`)
 
@@ -92,9 +100,9 @@ Use this when your folders are already named per GameVault conventions. Each arc
 .\Compress-ForGameVault.ps1
 ```
 
-4. All validly-named folders in `GOG-Archive\` and `Steam-Archive\` are compressed to `GameVault-Ready\` using maximum compression
-5. Folders whose archive already exists in the destination are skipped automatically
-6. Folders missing the required `(YYYY)` suffix are listed in the warning summary and skipped — rename them or run `Prepare-GamesForGameVault.ps1` to handle them interactively
+4. All validly-named folders in the source directories are compressed to `GameVault-Ready\` using maximum compression; a row is appended to `GameVault-Ready\manifest.csv` after each success
+5. Folders whose archive already exists are integrity-tested with `7z t` before being skipped. Corrupt archives are deleted and rebuilt. Pass `-SkipIntegrityCheck` to skip the test, or `-Force` to always re-archive
+6. Folders missing the required `(YYYY)` suffix are reported and skipped — rename them or run `Prepare-GamesForGameVault.ps1` to handle them interactively
 
 ## GameVault Naming Convention
 
@@ -136,6 +144,53 @@ For full details, see the [GameVault file naming docs](https://gamevau.lt/docs/s
 ## Output
 
 Final archives land in `GameVault-Ready\`. Copy them to your GameVault server's `/files` directory (or your configured ingest path) for import.
+
+Each successful compression appends a row to `GameVault-Ready\manifest.csv`:
+
+| Column | Description |
+|--------|-------------|
+| `CompletedAt` | ISO-8601 timestamp |
+| `Name` | Archive filename (without `.7z`) |
+| `Source` | Source label (e.g. `GOG`, `Steam`) |
+| `SourceBytes` | Uncompressed folder size |
+| `ArchiveBytes` | Final archive size |
+| `CompressionRatio` | `ArchiveBytes / SourceBytes` |
+| `DurationSeconds` | Elapsed compression time |
+| `SHA256` | SHA-256 of archive, or empty if `-EmitSha256` not passed |
+
+## Parameters
+
+Both scripts accept these parameters (all have sensible defaults):
+
+### `Compress-ForGameVault.ps1`
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `-Sources` | `hashtable` | `@{ GOG=…; Steam=… }` | Map of `Label → SourceDir`. Add any number of sources without forking. |
+| `-DestinationDir` | `string` | `.\GameVault-Ready` | Output directory for archives and manifest. |
+| `-SevenZipPath` | `string` | auto-detected | Path to `7z.exe`. Overrides `$env:SEVENZIP_PATH`. |
+| `-Force` | `switch` | off | Re-archive even when a `.7z` already exists. |
+| `-SkipIntegrityCheck` | `switch` | off | Skip `7z t` test on existing archives before deciding to skip. |
+| `-Parallel` | `switch` | off | Fan out compressions across runspaces (PS 7+ only). |
+| `-ThrottleLimit` | `int` | `2` | Max concurrent jobs when `-Parallel` is set. |
+| `-EmitSha256` | `switch` | off | Compute and record SHA-256 of each archive in the manifest. |
+| `-WhatIf` | `switch` | off | Dry-run: report what would be compressed without writing. |
+
+```powershell
+# Example: custom sources, parallel, 3 threads
+.\Compress-ForGameVault.ps1 -Sources @{ GOG='D:\GOG'; Itch='E:\Itch' } -Parallel -ThrottleLimit 3
+```
+
+### `Prepare-GamesForGameVault.ps1`
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `-GogSourceDir` | `string` | `.\GOG-Archive` | Path to GOG game folders. |
+| `-SteamSourceDir` | `string` | `.\Steam-Archive` | Path to Steam game folders. |
+| `-DestinationDir` | `string` | `.\GameVault-Ready` | Output directory for archives and manifest. |
+| `-SevenZipPath` | `string` | auto-detected | Path to `7z.exe`. Overrides `$env:SEVENZIP_PATH`. |
+| `-EmitSha256` | `switch` | off | Compute and record SHA-256 of each archive in the manifest. |
+| `-WhatIf` | `switch` | off | Dry-run: report what would be compressed without writing. |
 
 ## Security Note
 
