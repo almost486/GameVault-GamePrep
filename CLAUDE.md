@@ -9,13 +9,40 @@ PowerShell scripts that compress GOG/Steam game folders into `.7z` archives for 
 - **No automated tests** — scripts are validated manually on Windows
 - **Large game directories are gitignored:** `GOG-Archive/`, `Steam-Archive/`, `GameVault-Ready/`
 
+## Prerequisites
+
+- Windows: 7-Zip installed (`C:\Program Files\7-Zip\7z.exe`) or set `$env:SEVENZIP_PATH`
+- macOS (dev): `brew install gitleaks`
+
 ## Setup (after clone)
 
 ```bash
 bash scripts/install-hooks.sh   # sets core.hooksPath → scripts/hooks
 ```
 
-Requires `gitleaks` installed (`brew install gitleaks`) for pre-commit secret scanning.
+## Script Usage
+
+```powershell
+# Prepare-GamesForGameVault.ps1 — interactive; prompts for title, year, source
+.\Prepare-GamesForGameVault.ps1 [-EmitSha256]
+
+# Compress-ForGameVault.ps1 — batch; folders must already be named correctly
+.\Compress-ForGameVault.ps1 [-Force] [-SkipIntegrityCheck] [-Parallel] [-EmitSha256]
+# -Parallel only helps when source and dest are on different physical drives
+# Custom sources: -Sources @{ GOG='D:\GOG'; Itch='E:\Itch' }
+```
+
+## Folder Naming Convention
+
+GameVault requires: `Game Title (YYYY)` — must end with `(4-digit year)`.
+`Prepare-GamesForGameVault.ps1` enforces this interactively.
+`Compress-ForGameVault.ps1` validates and skips non-conforming folders.
+
+## Outputs
+
+- `.7z` archives → `GameVault-Ready/` (gitignored)
+- `manifest.csv` in destination — one row per successful compression
+- Existing archives are integrity-checked (`7z t`) before skipping; use `-SkipIntegrityCheck` to bypass
 
 ## Security
 
